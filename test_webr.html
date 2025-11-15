@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<body>
+<div id="log">Loading…</div>
+
+<script type="module">
+import { WebR } from "https://webr.r-wasm.org/latest/webr.mjs";
+
+const log = msg => document.getElementById("log").innerText += "\n" + msg;
+
+async function run() {
+  log("Initializing webR…");
+  const webR = new WebR();
+  await webR.init();
+  log("webR ready!");
+
+  const res = await webR.evalR("1 + 1");
+  log("R says: " + await res.toString());
+}
+run();
+</script>
+</body>
+</html>
