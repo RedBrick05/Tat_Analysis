@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Agreement TAT — Combined CSV Diagnostic</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<script type="module" src="https://webr.r-wasm.org/latest/webr.mjs"></script>
+<style>
+  body { font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, Arial; margin:20px; color:#0f172a; }
+  h1 { margin:0 0 6px; font-size:1.3rem; }
+  #status { background:#f8fafc; border:1px solid #e6eef6; padding:12px; border-radius:8px; white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; max-height:180px; overflow:auto; }
+  .controls { margin-top:12px; display:flex; gap:12px; align-items:center; }
+  .card { background:#fff; padding:12px; border-radius:8px; box-shadow:0 1px 6px rgba(2,6,23,0.04); border:1px solid #eef6ff; margin-top:14px; }
+  pre.result { white-space:pre-wrap; background:#fbfdff; padding:10px; border-radius:6px; border:1px solid #eef6f9; max-height:360px; overflow:auto; }
+  button { padding:8px 12px; border-radius:6px; border:none; background:#2563eb; color:#fff; cursor:pointer; }
+  button.secondary { background:#6b7280; }
+  table { border-collapse:collapse; width:100%; margin-top:8px; font-size:0.92rem; }
+  th, td { border:1px solid #eef2f7; padding:6px 8px; text-align:left; }
+  th { background:#f1f5f9; }
+</style>
+</head>
+<body>
+  <h1>Agreement TAT — Combined CSV Diagnostic</h1>
+  <p class="muted">Upload your CSV and get a comprehensive diagnostic (raw lines, parse attempts, column names, row counts, preview rows). Download the diagnostic JSON for later use.</p>
+
+  <div id="status">Initializing webR...</div>
+
+  <div class="controls">
+    <input id="csvFile" type="file" accept=".csv" />
+    <button id="runBtn" disabled>Run diagnostic</button>
+    <button id="downloadBtn" class="secondary" style="display:none;">⬇️ Download diagnostic JSON</button>
+  </div>
+
+  <div id="output"></div>
+
+<script type="module">
+import { WebR } from "https://webr.r-wasm.org/latest/webr.mjs";
+
+const statusEl = document.getElementById('status');
+const fileInput = document.getElementById('csvFile');
+const runBtn = document.getElementById('runBtn');
+const downloadBtn = document.getElementById('downloadBtn');
+const output = document.getElementById('output');
+
+function log(s){ statusEl.textContent = (statusEl.textContent||'').replace(/\s+$/,'') + "\n" + s; statusEl.scrollTop = statusEl.scrollHeight; console.log(s); }
+
+let webR = null;
+let lastDiagJSON = null;
+
+async function initWebR(){
+  log("🚀 Starting webR...");
+  webR = new WebR();
+  await webR.init();
+  log("✅ webR ready.");
+  // Ensure jsonlite exists
+  log("📦 Ensuring jsonlite is available...");
+  try {
+    await webR.evalR("library(jsonlite)");
+    log("   ✔ jsonlite available.");
+  } catch(e){
+    log("   ➜ jsonlite missing — installing (this may take a moment)...");
+    await webR.installPackages("jsonlite");
+    await webR.evalR("library(jsonlite)");
+    log("   ✔ jsonlite installed.");
+  }
+  runBtn.disabled = false;
+}
+
+initWebR().catch(err => {
+  log("❌ webR initialization failed: " + err);
+  runBtn.disabled = true;
+});
+
+fileInput.addEventListener('change', () => {
+  runBtn.disabled = !fileInput.files[0];
+});
+
+runBtn.addEventListener('click', async () => {
+  const f = fileInput.files[0];
+  if(!f) return;
+  log(`\n📄 Reading file: ${f.name}`);
+  output.innerHTML = '';
+  downloadBtn.style.display = 'none';
+  lastDiagJSON = null;
+
+  // read bytes and write to virtual FS
+  const ab = await f.arrayBuffer();
+  const bytes = new Uint8Array(ab);
+  const path = '/home/web_user/tat_diag_input.csv';
+  webR.FS.writeFile(path, bytes);
+  log(`💾 Saved to ${path} in webR FS`);
+
+  // build R script to run diagnostics and return JSON string
+  const rScript = `
+    suppressWarnings({
+      library(jsonlite)
+      result <- list()
+      result$uploaded_file <- "${f.name}"
+      result$path <- "${path}"
+
+      raw <- try(readLines("${path}", warn=FALSE), silent=TRUE)
+      if(inherits(raw, "try-error")){
+        result$error_readlines <- as.character(raw)
+        result$raw_head <- list()
+      } else {
+        # strip BOM on first line
+        if(length(raw)>0) raw[1] <- sub('^\\\\ufeff', '', raw[1])
+        result$raw_head <- as.list(head(raw, 30))
+        result$raw_nlines <- length(raw)
+      }
+
+      # function to attempt parsing safely
+      safe_parse <- function(expr){
+        res <- list(ok=FALSE, error=NULL, nrows=NULL, cols=NULL, preview=NULL)
+        out <- try(eval(parse(text=expr)), silent=TRUE)
+        if(inherits(out, "try-error")) {
+          res$error <- as.character(out)
+        } else {
+          if(is.data.frame(out)){
+            res$ok <- TRUE
+            res$nrows <- nrow(out)
+            res$cols <- names(out)
+            # capture preview first 10 rows (converted to list of rows)
+            preview_rows <- utils::head(out, 10)
+            # convert preview to list of named rows (stringify each cell)
+            pr <- apply(preview_rows, 1, function(r){ as.list(r) })
+            res$preview <- unname(lapply(pr, function(x) lapply(x, function(v) if(is.null(v)) NA else as.character(v))))
+          } else {
+            res$error <- "result is not a data.frame"
+          }
+        }
+        res
+      }
+
+      methods <- list()
+
+      # attempt 1: standard read.csv (default behavior)
+      methods$read_csv_standard <- safe_parse('read.csv(text=paste(raw, collapse="\\\\n"), stringsAsFactors=FALSE, check.names=FALSE, na.strings=c("", "NA"))')
+
+      # attempt 2: read.csv with quote disabled (handles broken quoting)
+      methods$read_csv_noquote <- safe_parse('read.csv(text=paste(raw, collapse="\\\\n"), stringsAsFactors=FALSE, check.names=FALSE, quote="", na.strings=c("", "NA"))')
+
+      # attempt 3: read.table with fill (split on comma, no quotes)
+      methods$read_table_fill <- safe_parse('read.table(text=paste(raw, collapse="\\\\n"), sep=",", fill=TRUE, quote="", stringsAsFactors=FALSE, header=TRUE)')
+
+      # If any method succeeded, mark which
+      result$methods <- methods
+
+      # If at least one method worked, choose the best (prefer standard then noquote then table)
+      pick <- NULL
+      if(methods$read_csv_standard$ok) pick <- "read_csv_standard"
+      else if(methods$read_csv_noquote$ok) pick <- "read_csv_noquote"
+      else if(methods$read_table_fill$ok) pick <- "read_table_fill"
+      result$best_method <- pick
+
+      # If we have columns from best method, include them
+      if(!is.null(pick)){
+        result$columns <- methods[[pick]]$cols
+        result$nrows <- methods[[pick]]$nrows
+      } else {
+        result$columns <- NULL
+        result$nrows <- 0
+      }
+
+      # attach session info lightly
+      result$session_info <- list(R_version=R.version.string, platform=.Platform$OS.type)
+
+      # produce JSON string
+      json_str <- toJSON(result, pretty=TRUE, auto_unbox=TRUE, na="null")
+      json_str
+    })
+  `;
+
+  log("🔍 Running diagnostics in R (this may take a moment)...");
+  let rRes;
+  try {
+    rRes = await webR.evalR(rScript);
+  } catch(err){
+    log("❌ R execution error: " + (err && err.message ? err.message : String(err)));
+    return;
+  }
+
+  // Convert returned R value to JS string
+  // rRes.toArray() yields an array with the JSON string as first element
+  let arr = [];
+  try {
+    arr = await rRes.toArray();
+  } catch(e){
+    // fallback: try toString
+    try {
+      const s = await rRes.toString();
+      arr = [s];
+    } catch(_){}
+  }
+  if(!arr || arr.length === 0){
+    log("❌ Unexpected empty response from R.");
+    return;
+  }
+
+  const jsonText = arr[0];
+  lastDiagJSON = jsonText;
+
+  // show human-readable UI
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch(e){
+    log("❌ Could not parse JSON returned from R: " + e);
+    const pre = document.createElement('pre'); pre.className = 'card result'; pre.textContent = jsonText;
+    output.appendChild(pre);
+    return;
+  }
+
+  // Build output HTML
+  output.innerHTML = '';
+
+  // Raw head
+  const rawCard = document.createElement('div'); rawCard.className='card';
+  rawCard.innerHTML = `<h3>Raw CSV head (first 30 lines)</h3>`;
+  const preRaw = document.createElement('pre'); preRaw.className='result';
+  preRaw.textContent = (parsed.raw_head && parsed.raw_head.length) ? parsed.raw_head.join("\\n") : "(no raw lines)";
+  rawCard.appendChild(preRaw);
+  output.appendChild(rawCard);
+
+  // Methods summary
+  const methCard = document.createElement('div'); methCard.className='card';
+  methCard.innerHTML = `<h3>Parsing method results</h3>`;
+  const methodTable = document.createElement('table');
+  methodTable.innerHTML = '<tr><th>Method</th><th>OK</th><th>Rows</th><th>Cols</th><th>Error / Notes</th></tr>`;
+  for(const m of ['read_csv_standard','read_csv_noquote','read_table_fill']){
+    const info = parsed.methods[m];
+    const ok = info && info.ok ? 'YES':'NO';
+    const nrows = info && info.nrows ? info.nrows : '';
+    const cols = info && info.cols ? (Array.isArray(info.cols) ? info.cols.join(', ') : '') : '';
+    const err = info && info.error ? info.error : '';
+    methodTable.innerHTML += `<tr><td>${m}</td><td>${ok}</td><td>${nrows}</td><td style="max-width:360px">${cols}</td><td style="color:#b91c1c">${err}</td></tr>`;
+  }
+  methCard.appendChild(methodTable);
+  output.appendChild(methCard);
+
+  // Best method details & preview
+  const pick = parsed.best_method;
+  const bestCard = document.createElement('div'); bestCard.className='card';
+  bestCard.innerHTML = `<h3>Best method: ${pick || '(none)'}</h3>`;
+  if(pick && parsed.methods && parsed.methods[pick] && parsed.methods[pick].preview){
+    // preview is an array of rows (objects)
+    const previewRows = parsed.methods[pick].preview;
+    // build table
+    const tbl = document.createElement('table');
+    // header
+    const firstRow = previewRows[0] || {};
+    const cols = Object.keys(firstRow);
+    tbl.innerHTML = '<tr>' + cols.map(c=>`<th>${c}</th>`).join('') + '</tr>';
+    for(const rrow of previewRows){
+      const tds = cols.map(c => `<td>${rrow[c] === null ? '' : escapeHtml(String(rrow[c]))}</td>`).join('');
+      tbl.innerHTML += `<tr>${tds}</tr>`;
+    }
+    bestCard.appendChild(tbl);
+  } else {
+    bestCard.innerHTML += `<div class="small">No preview available (no method parsed successfully).</div>`;
+  }
+  output.appendChild(bestCard);
+
+  // meta
+  const metaCard = document.createElement('div'); metaCard.className='card';
+  metaCard.innerHTML = `<h3>Metadata</h3><pre class="result">${escapeHtml(JSON.stringify(parsed.session_info, null, 2))}</pre>`;
+  output.appendChild(metaCard);
+
+  // Download button
+  downloadBtn.style.display = 'inline-block';
+  downloadBtn.onclick = () => {
+    const blob = new Blob([jsonText], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = "tat_diag_result.json";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  log("✅ Diagnostics complete. Review results and download JSON if needed.");
+});
+
+// small helper to escape HTML
+function escapeHtml(s){
+  return s.replace(/[&<>"'`]/g, (m) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','`':'&#96;'})[m]);
+}
+</script>
+</body>
+</html>
