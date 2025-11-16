@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Agreement TAT — Analysis (Final A1)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<script type="module" src="https://webr.r-wasm.org/latest/webr.mjs"></script>
+<style>
+  :root{--accent:#2563eb;--muted:#6b7280;--card:#fff;--bg:#f8fafc}
+  body{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;margin:20px;color:#0f172a}
+  h1{margin:0 0 6px;font-size:1.4rem}
+  p.lead{margin:0 0 12px;color:var(--muted)}
+  #status{background:var(--bg);border:1px solid #e6eef6;padding:12px;border-radius:8px;white-space:pre-wrap; font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; max-height:220px; overflow:auto}
+  .controls{display:flex;gap:12px;align-items:center;margin-top:12px}
+  input[type="file"]{padding:6px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:18px}
+  .card{background:var(--card);border-radius:10px;padding:14px;box-shadow:0 1px 6px rgba(2,6,23,0.04);border:1px solid #eef6ff}
+  .card h3{margin:0 0 8px;font-size:1rem}
+  table{width:100%;border-collapse:collapse;font-size:0.92rem;margin-top:8px}
+  th,td{border:1px solid #eef2f7;padding:6px 8px;text-align:left}
+  th{background:#f1f5f9}
+  a.btn{display:inline-block;margin:6px 6px 6px 0;padding:8px 10px;border-radius:6px;background:var(--accent);color:#fff;text-decoration:none;font-size:0.86rem}
+  .muted{color:var(--muted)}
+  .small{font-size:0.88rem;color:#374151}
+  .flex-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+</style>
+</head>
+<body>
+  <h1>Agreement Turnaround Time — Full Analysis</h1>
+  <p class="lead">Upload <code>Report_Dump_UTF8.csv</code>. This page runs summarised statistics, parametric & nonparametric tests, writes downloadable CSV results, and performs a full 3-factor ANOVA (and separate factor tests).</p>
+
+  <div id="status">Initializing webR…</div>
+
+  <div class="controls">
+    <input id="csvFile" type="file" accept=".csv" />
+    <div class="muted">Status updates appear above. Results & downloads appear below when ready.</div>
+  </div>
+
+  <div id="results"></div>
+
+<script type="module">
+import { WebR } from "https://webr.r-wasm.org/latest/webr.mjs";
+
+const status = document.getElementById("status");
+const resultsDiv = document.getElementById("results");
+const input = document.getElementById("csvFile");
+
+function logLine(msg){
+  status.textContent = (status.textContent||"").replace(/\s+$/,'') + "\n" + msg;
+  status.scrollTop = status.scrollHeight;
+  console.log(msg);
+}
+
+function safeRead(webR, path){
+  try{
+    const bytes = webR.FS.readFile(path);
+    if(!bytes) return null;
+    return new TextDecoder("utf-8").decode(bytes);
+  }catch(e){
+    return null;
+  }
+}
+
+async function saveBlob(bytes, filename){
+  const blob = new Blob([bytes], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+
+// Exact column names you confirmed
+const COL_TAT = "Agreement Turn Around Time (TAT, days)";
+const COL_TYPE = "Agreement Type";
+const COL_LEGAL = "Legal Reference Number";
+const COL_PARTIES = "Number of Related Parties";
+
+(async function main(){
+  let webR;
+  logLine("🚀 Starting webR...");
+  try {
+    webR = new WebR();
+    await webR.init();
+    logLine("✅ webR ready.");
+  } catch(err){
+    logLine("❌ webR failed to initialize: " + err);
+    return;
+  }
+
+  // Install packages (cached if available)
+  const pkgs = ["dplyr","rstatix","jsonlite","ggplot2","stats","utils"];
+  for(const p of pkgs){
+    logLine(`📦 Installing/caching ${p} ...`);
+    try{
+      await webR.installPackages(p);
+      logLine(`   ✔ ${p}`);
+    } catch(e){
+      logLine(`   ⚠ ${p} install error: ${e && e.message ? e.message : String(e)}`);
+    }
+  }
+  logLine("📂 Ready — please upload your CSV file.");
+
+  input.addEventListener("change", async (ev) => {
+    const file = ev.target.files[0];
+    if(!file) return;
+    logLine(`\n📄 Reading: ${file.name}`);
+
+    // write file to writable area
+    const home = "/home/web_user/";
+    const outdir = home + "tat_out/";
+    const dataPath = home + "tat_data.csv";
+
+    const ab = await file.arrayBuffer();
+    webR.FS.writeFile(dataPath, new Uint8Array(ab));
+    logLine(`💾 Saved → ${dataPath}`);
+
+    logLine("🔍 Running analyses (may take 20–60s on first run while packages load)...");
+
+    // Build robust R script as a single string (joined with real newlines)
+    const rScript = [
+      "suppressWarnings({",
+      "library(dplyr); library(rstatix); library(jsonlite); library(stats); library(utils)",
+      "",
+      `dir.create("${outdir}", showWarnings=FALSE, recursive=TRUE)`,
+      "",
+      "# Read CSV robustly",
+      "raw <- readLines('" + dataPath + "', warn=FALSE)",
+      "raw <- raw[raw != '']",
+      "if(length(raw) == 0) stop('CSV file appears empty')",
+      "raw[1] <- sub('^\\\\ufeff', '', raw[1])",
+      "csv_text <- paste(raw, collapse='\\n')",
+      "df <- read.csv(text=csv_text, stringsAsFactors=FALSE, check.names=FALSE, na.strings=c('','NA'))",
+      "names(df) <- trimws(names(df))",
+     "",
+      `col_tat <- "${COL_TAT}"`,
+      `col_type <- "${COL_TYPE}"`,
+      `col_legal <- "${COL_LEGAL}"`,
+      `col_parties <- "${COL_PARTIES}"`,
+      "",
+      "writeLines(c(",
+      "  paste0('TAT->', if(col_tat %in% names(df)) col_tat else 'MISSING'),",
+      "  paste0('Type->', if(col_type %in% names(df)) col_type else 'MISSING'),",
+      "  paste0('Legal->', if(col_legal %in% names(df)) col_legal else 'MISSING'),",
+      "  paste0('Parties->', if(col_parties %in% names(df)) col_parties else 'MISSING')",
+      `), paste0("${outdir}", 'tat_debug_cols.txt'))`,
+      "",
+      "if(!(col_tat %in% names(df))) stop('TAT column not found exactly as expected')",
+      "",
+      "# Convert TAT to numeric and drop NA TAT rows",
+      "df[[col_tat]] <- suppressWarnings(as.numeric(df[[col_tat]]))",
+      "df <- df %>% filter(!is.na(.data[[col_tat]]))",
+      "",
+      "# Parties to numeric if present",
+      "if(col_parties %in% names(df)) df[[col_parties]] <- suppressWarnings(as.numeric(as.character(df[[col_parties]])))",
+      "",
+      "# create variants",
+      "df_full <- df",
+      "df_0_59 <- df %>% filter(.data[[col_tat]] >= 0 & .data[[col_tat]] <= 59)",
+      "df_log <- df %>% mutate(TAT_log = log10(.data[[col_tat]] + 1))",
+      "df_0_59_log <- df_0_59 %>% mutate(TAT_log = log10(.data[[col_tat]] + 1))",
+      "",
+      "# helper: safe write (always writes a file)",
+      "safe_write <- function(obj, path){ tryCatch({ write.csv(obj, path, row.names=FALSE); TRUE }, error=function(e){ write.csv(data.frame(), path, row.names=FALSE); FALSE }) }",
+      "",
+      "# summary table generator",
+      "summary_table <- function(d, group=NULL, y=col_tat){",
+      "  if(is.null(group)){",
+      "    data.frame(N = length(d[[y]]), Mean = mean(d[[y]], na.rm=TRUE), Median = median(d[[y]], na.rm=TRUE), SD = sd(d[[y]], na.rm=TRUE), SEM = sd(d[[y]], na.rm=TRUE)/sqrt(max(1, length(d[[y]]))))",
+      "  } else {",
+      "    if(!(group %in% names(d))) return(data.frame())",
+      "    d %>% group_by(.data[[group]]) %>% summarise(N=n(), Mean=mean(.data[[y]], na.rm=TRUE), Median=median(.data[[y]], na.rm=TRUE), SD=sd(.data[[y]], na.rm=TRUE), SEM=SD/sqrt(N), .groups='drop') %>% rename(Category=1)",
+      "  }",
+      "}",
+      "",
+      "# run analyses for a dataset, tag, and y variable",
+      "analyze_write <- function(dset, tag, yvar){",
+      "  prefix <- paste0('" + outdir + "tat_', tag, '_')",
+      "  # summaries",
+      "  safe_write(summary_table(dset, NULL, yvar), paste0(prefix, 'summary_overall.csv'))",
+      "  safe_write(summary_table(dset, col_type, yvar), paste0(prefix, 'summary_by_type.csv'))",
+      "  safe_write(summary_table(dset, col_legal, yvar), paste0(prefix, 'summary_by_legal.csv'))",
+      "  safe_write(summary_table(dset, col_parties, yvar), paste0(prefix, 'summary_by_parties.csv'))",
+      "",
+      "  # separate factor tests by Agreement Type (parametric + nonparametric)",
+      "  if(col_type %in% names(dset) && length(unique(na.omit(dset[[col_type]])))>1){",
+      "    # parametric ANOVA",
+      "    aov_res <- tryCatch(aov(as.formula(paste0('`', yvar, '` ~ `', col_type, '`')), data=dset), error=function(e) NULL)",
+      "    if(!is.null(aov_res)) safe_write(as.data.frame(summary(aov_res)[[1]]), paste0(prefix,'aov_type.csv')) else safe_write(data.frame(), paste0(prefix,'aov_type.csv'))",
+      "    # Tukey",
+      "    tuk <- tryCatch(TukeyHSD(aov_res), error=function(e) NULL)",
+      "    if(!is.null(tuk)){ td <- as.data.frame(tuk[[1]]); td$Comparison <- rownames(td); safe_write(td[,c('Comparison','diff','lwr','upr','p.adj')], paste0(prefix,'tukey_type.csv')) } else safe_write(data.frame(), paste0(prefix,'tukey_type.csv'))",
+      "  } else {",
+      "    safe_write(data.frame(), paste0(prefix,'aov_type.csv')); safe_write(data.frame(), paste0(prefix,'tukey_type.csv'))",
+      "  }",
+      "",
+      "  # Kruskal and Dunn for Agreement Type",
+      "  if(col_type %in% names(dset) && length(unique(na.omit(dset[[col_type]])))>1){",
+      "    kw <- tryCatch(kruskal_test(dset, formula = as.formula(paste0('`', yvar, '` ~ `', col_type, '`'))), error=function(e) NULL)",
+      "    if(!is.null(kw)) safe_write(as.data.frame(kw), paste0(prefix,'kw_type.csv')) else safe_write(data.frame(), paste0(prefix,'kw_type.csv'))",
+      "    dn <- tryCatch(dunn_test(dset, formula = as.formula(paste0('`', yvar, '` ~ `', col_type, '`')), p.adjust.method='bonferroni'), error=function(e) NULL)",
+      "    if(!is.null(dn)) safe_write(as.data.frame(dn), paste0(prefix,'dunn_type.csv')) else safe_write(data.frame(), paste0(prefix,'dunn_type.csv'))",
+      "  } else { safe_write(data.frame(), paste0(prefix,'kw_type.csv')); safe_write(data.frame(), paste0(prefix,'dunn_type.csv')) }",
+      "",
+      "  # Tests by Legal Review (two-group tests assumed or multi-group handled)",
+      "  if(col_legal %in% names(dset) && length(unique(na.omit(dset[[col_legal]])))>1){",
+      "    wil <- tryCatch(wilcox_test(dset, formula = as.formula(paste0('`', yvar, '` ~ `', col_legal, '`'))), error=function(e) NULL)",
+      "    tt  <- tryCatch(t_test(dset, formula = as.formula(paste0('`', yvar, '` ~ `', col_legal, '`'))), error=function(e) NULL)",
+      "    if(!is.null(wil)) safe_write(as.data.frame(wil), paste0(prefix,'legal_wilcox.csv')) else safe_write(data.frame(), paste0(prefix,'legal_wilcox.csv'))",
+      "    if(!is.null(tt)) safe_write(as.data.frame(tt), paste0(prefix,'legal_ttest.csv')) else safe_write(data.frame(), paste0(prefix,'legal_ttest.csv'))",
+      "  } else { safe_write(data.frame(), paste0(prefix,'legal_wilcox.csv')); safe_write(data.frame(), paste0(prefix,'legal_ttest.csv')) }",
+      "",
+      "  # Correlation: Parties vs yvar",
+      "  if(col_parties %in% names(dset) && sum(!is.na(dset[[col_parties]]))>2){",
+      "    cs <- tryCatch(cor_test(dset, formula = as.formula(paste0('`', col_parties, '` ~ `', yvar, '`')), method='spearman'), error=function(e) NULL)",
+      "    cp <- tryCatch(cor_test(dset, formula = as.formula(paste0('`', col_parties, '` ~ `', yvar, '`')), method='pearson'), error=function(e) NULL)",
+      "    if(!is.null(cs)) safe_write(as.data.frame(cs), paste0(prefix,'corr_spearman.csv')) else safe_write(data.frame(), paste0(prefix,'corr_spearman.csv'))",
+      "    if(!is.null(cp)) safe_write(as.data.frame(cp), paste0(prefix,'corr_pearson.csv')) else safe_write(data.frame(), paste0(prefix,'corr_pearson.csv'))",
+      "  } else { safe_write(data.frame(), paste0(prefix,'corr_spearman.csv')); safe_write(data.frame(), paste0(prefix,'corr_pearson.csv')) }",
+      "",
+      "  return(list(tag=tag, n = nrow(dset)))",
+      "}",
+      "",
+      "# Run analyses: full (raw TAT), 0_59, log (full), log 0_59",
+      "res_full <- analyze_write(df_full, 'full', col_tat)",
+      "res_0_59 <- analyze_write(df_0_59, '0_59', col_tat)",
+      "res_log <- analyze_write(df_log, 'log', 'TAT_log')",
+      "res_0_59_log <- analyze_write(df_0_59_log, '0_59_log', 'TAT_log')",
+      "",
+      "# Full 3-way ANOVA (if feasible) - TAT ~ Type * Legal * Parties",
+      "threeway_ok <- tryCatch({",
+      "  if(!(col_type %in% names(df_full)) || !(col_legal %in% names(df_full)) || !(col_parties %in% names(df_full))) stop('3-way columns missing')",
+      "  # require at least 2 levels in type and legal; parties numeric",
+      "  if(length(unique(na.omit(df_full[[col_type]]))) < 2) stop('not enough levels in type')",
+      "  if(length(unique(na.omit(df_full[[col_legal]]))) < 2) stop('not enough levels in legal')",
+      "  TRUE",
+      "}, error=function(e) FALSE)",
+      "",
+      "if(threeway_ok){",
+      "  # use as.formula safely",
+      "  fml <- as.formula(paste0('`', col_tat, '` ~ `', col_type, '` * `', col_legal, '` * `', col_parties, '`'))",
+      "  three_aov <- tryCatch(aov(fml, data=df_full), error=function(e) NULL)",
+      "  if(!is.null(three_aov)) safe_write(as.data.frame(summary(three_aov)[[1]]), paste0('" + outdir + "tat_threeway_aov.csv')) else safe_write(data.frame(), paste0('" + outdir + "tat_threeway_aov.csv'))",
+      "} else { safe_write(data.frame(), paste0('" + outdir + "tat_threeway_aov.csv')) }",
+      "",
+      "# create manifest listing output files",
+      "files <- list.files('" + outdir + "')",
+      "manifest <- list(output = '" + outdir + "', files = files)",
+      "write(toJSON(manifest, pretty=TRUE, auto_unbox=TRUE), paste0('" + outdir + "tat_manifest.json'))",
+      "})"
+    ].join("\n");
+
+    // Run R script
+    try {
+      await webR.evalR(rScript);
+      logLine("✅ R script finished (attempted).");
+    } catch(err){
+      logLine("❌ R execution error: " + (err && err.message ? err.message : String(err)));
+      // attempt to capture R traceback
+      try {
+        const tb = await webR.evalR("capture.output(traceback())");
+        const arr = await tb.toArray();
+        if(arr && arr.length) logLine("🔍 R traceback:\n" + arr.join("\n"));
+      } catch(e){}
+    }
+
+    // Read manifest
+    const manifestPath = outdir + "tat_manifest.json";
+    const manifestText = safeRead(webR, manifestPath);
+    if(!manifestText){
+      logLine("❌ " + manifestPath + " not found — analysis likely failed early.");
+      // show debug cols file if present
+      const debugCols = safeRead(webR, outdir + "tat_debug_cols.txt");
+      if(debugCols) {
+        logLine("📦 Detected columns (partial):\n" + debugCols);
+      } else {
+        logLine("ℹ No debug columns file found.");
+      }
+      resultsDiv.innerHTML = `<div class="card"><h3 class="muted">Analysis failed early — check status above for R errors.</h3></div>`;
+      return;
+    }
+
+    logLine("✅ Manifest found — building results UI.");
+    let manifest;
+    try { manifest = JSON.parse(manifestText); } catch(e){
+      logLine("❌ Could not parse manifest JSON: " + e);
+      return;
+    }
+
+    // Build results HTML
+    let html = `<div class="grid">`;
+    html += `<div class="card"><h3>Output location</h3><div class="small">Path: <code>${manifest.output}</code></div><h3 style="margin-top:8px">Files</h3><ul>`;
+    manifest.files.forEach(f => html += `<li>${f}</li>`);
+    html += `</ul></div>`;
+
+    // Prettify some summary displays (overall summaries for each variant)
+    const variants = ["full","0_59","log","0_59_log"];
+    for(const v of variants){
+      const summaryPath = outdir + `tat_${v}_summary_overall.csv`;
+      const txt = safeRead(webR, summaryPath);
+      html += `<div class="card"><h3>Summary — ${v.replace('_',' ')}</h3>`;
+      if(txt){
+        const rows = txt.trim().split(/\r?\n/).map(r => r.split(","));
+        html += `<table><tr>${rows[0].map(h=>`<th>${h}</th>`).join("")}</tr>`;
+        for(let i=1;i<rows.length;i++) html += `<tr>${rows[i].map(c=>`<td>${c}</td>`).join("")}</tr>`;
+        html += `</table>`;
+      } else {
+        html += `<div class="small">No overall summary available for this variant.</div>`;
+      }
+      html += `<div style="margin-top:10px" class="flex-row">`;
+      // download buttons for known files for this variant
+      const baseFiles = [
+        `tat_${v}_summary_overall.csv`,
+        `tat_${v}_summary_by_type.csv`,
+        `tat_${v}_summary_by_legal.csv`,
+        `tat_${v}_summary_by_parties.csv`,
+        `tat_${v}_aov_type.csv`,
+        `tat_${v}_tukey_type.csv`,
+        `tat_${v}_kw_type.csv`,
+        `tat_${v}_dunn_type.csv`,
+        `tat_${v}_legal_wilcox.csv`,
+        `tat_${v}_legal_ttest.csv`,
+        `tat_${v}_corr_spearman.csv`,
+        `tat_${v}_corr_pearson.csv`
+      ];
+      baseFiles.forEach(fn => {
+        const path = outdir + fn;
+        const content = safeRead(webR, path);
+        if(content !== null){
+          const url = URL.createObjectURL(new Blob([content], {type:"text/csv"}));
+          html += `<a class="btn" href="${url}" download="${fn}">⬇️ ${fn}</a>`;
+        }
+      });
+      html += `</div></div>`;
+    }
+
+    // three-way ANOVA download
+    const threewayPath = outdir + "tat_threeway_aov.csv";
+    const threewayTxt = safeRead(webR, threewayPath);
+    html += `<div class="card"><h3>3-Factor ANOVA (Type * Legal * Parties)</h3>`;
+    if(threewayTxt && threewayTxt.trim().length>0){
+      html += `<div class="small">3-way ANOVA produced results.</div>`;
+      const url3 = URL.createObjectURL(new Blob([threewayTxt], {type:"text/csv"}));
+      html += `<a class="btn" href="${url3}" download="tat_threeway_aov.csv">⬇️ tat_threeway_aov.csv</a>`;
+    } else {
+      html += `<div class="small">No 3-way ANOVA results (not enough data or columns missing).</div>`;
+    }
+    html += `</div>`;
+
+    // global manifest download
+    const manBlob = new Blob([manifestText], {type:"application/json"});
+    const manUrl = URL.createObjectURL(manBlob);
+    html += `<div class="card"><h3>Manifest</h3><div class="small">You can download the manifest of produced files:</div><a class="btn" href="${manUrl}" download="tat_manifest.json">⬇️ tat_manifest.json</a></div>`;
+
+    html += `</div>`;
+    resultsDiv.innerHTML = html;
+    logLine("⬇️ Results UI built. Use the CSV buttons to download outputs.");
+  });
+
+})(); // main
+</script>
+</body>
+</html>
