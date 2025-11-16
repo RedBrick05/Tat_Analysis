@@ -1,73 +1,126 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<title>Diagnostic D1 — Directory Listing</title>
-<script type="module" src="https://webr.r-wasm.org/latest/webr.mjs"></script>
-<style>
-  body { font-family: system-ui, sans-serif; margin:20px; }
-  #log { white-space: pre-wrap; background:#f3f4f6; padding:12px; border-radius:8px; height:250px; overflow:auto; }
-</style>
-</head>
-<body>
-
-<h1>Diagnostic D1 — Check Output Directory</h1>
-<input id="file" type="file" accept=".csv" />
-<div id="log">Initializing…</div>
-
+<meta charset="UTF-8" />
+<title>webR Diagnostic Tool</title>
 <script type="module">
 import { WebR } from "https://webr.r-wasm.org/latest/webr.mjs";
 
-const log = (msg) => {
+function log(msg) {
   const el = document.getElementById("log");
-  el.textContent += "\n" + msg;
-  el.scrollTop = el.scrollHeight;
-};
+  el.textContent += msg + "\n";
+}
 
-(async function(){
-  log("Starting webR…");
+async function main() {
+  log("Initializing…");
   const webR = new WebR();
   await webR.init();
+  log("Starting webR…");
   log("webR ready.");
 
-  document.getElementById("file").addEventListener("change", async (ev)=>{
-    const f = ev.target.files[0];
-    if(!f){ return; }
+  // Create diagnostic directory
+  await webR.evalR(`dir.create('/home/web_user/tat_diag', showWarnings = FALSE, recursive = TRUE)`);
 
-    log("Uploading file…");
-    const ab = await f.arrayBuffer();
-    const path = "/home/web_user/tat_diag_test.csv";
-    const outdir = "/home/web_user/tat_diag/";
+  // ---------- FILE UPLOAD ----------
+  const input = document.getElementById("fileInput");
+  input.addEventListener("change", async (ev) => {
+    const file = ev.target.files[0];
+    if (!file) return;
 
-    webR.FS.writeFile(path, new Uint8Array(ab));
-    log("File written to: " + path);
+    log(`\n📄 Reading file: ${file.name}`);
+    const buffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
 
-    const r = `
-      suppressWarnings({
-        dir.create("${outdir}", showWarnings=FALSE, recursive=TRUE)
-        # Create a test file
-        writeLines("test content", paste0("${outdir}", "testfile.txt"))
-      })
+    // Save uploaded CSV to FS
+    const target = "/home/web_user/tat_diag/input.csv";
+    webR.FS.writeFile(target, bytes);
+    log(`💾 Saved → ${target}`);
+
+    log("🔍 Running CSV diagnostics…");
+
+    // ---- R CODE FOR DIAGNOSTICS ----
+    const rCode = `
+      library(jsonlite)
+
+      result <- list()
+      result$exists <- file.exists("${target}")
+
+      # Try to read CSV
+      if (result$exists) {
+        raw <- readLines("${target}", warn=FALSE)
+        result$first_lines <- head(raw, 10)
+        result$n_lines <- length(raw)
+
+        # Try parsing columns
+        df <- try(read.csv("${target}", stringsAsFactors=FALSE), silent=TRUE)
+        if (inherits(df, "try-error")) {
+          result$parse_error <- as.character(df)
+        } else {
+          result$columns <- names(df)
+          result$n_rows <- nrow(df)
+        }
+      }
+
+      # Write diagnostics
+      write(
+        toJSON(result, pretty=TRUE, auto_unbox=TRUE),
+        "/home/web_user/tat_diag/diag_result.json"
+      )
+
+      # Write a test file too
+      write("Diagnostic test OK", "/home/web_user/tat_diag/test.txt")
     `;
-    await webR.evalR(r);
-    log("R wrote a test file.");
 
-    log("Listing /home/web_user:");
     try {
-      log(webR.FS.readdir("/home/web_user").join("\n"));
-    } catch(e){
-      log("ERROR listing /home/web_user: " + e);
+      await webR.evalR(rCode);
+      log("✅ Diagnostics created.");
+    } catch (e) {
+      log("❌ R error during diagnostics: " + e.message);
     }
 
-    log("Listing /home/web_user/tat_diag:");
+    // ---- LIST FILES (using R, not JS) ----
+    log("\n📁 Listing /home/web_user (via R)...");
     try {
-      log(webR.FS.readdir("/home/web_user/tat_diag").join("\n"));
-    } catch(e){
-      log("ERROR listing diag dir: " + e);
+      const rList = await webR.evalR(`list.files('/home/web_user', recursive=TRUE)`);
+      const arr = await rList.toArray();
+      log(arr.join("\n"));
+    } catch (e) {
+      log("❌ Failed to list /home/web_user: " + e);
     }
+
+    log("\n📁 Listing /home/web_user/tat_diag...");
+    try {
+      const rList2 = await webR.evalR(`list.files('/home/web_user/tat_diag', recursive=TRUE)`);
+      const arr2 = await rList2.toArray();
+      log(arr2.join("\n"));
+    } catch (e) {
+      log("❌ Failed to list tat_diag: " + e);
+    }
+
+    log("\nDone.");
   });
-})();
+}
+
+main();
 </script>
 
+<style>
+body { font-family: ui-sans-serif, system-ui; margin: 20px; }
+#log {
+  white-space: pre-wrap;
+  background: #f0f0f0;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid #ccc;
+}
+</style>
+</head>
+
+<body>
+<h2>webR Diagnostic Tool</h2>
+<p>This tool helps diagnose CSV and webR filesystem handling.</p>
+
+<input type="file" id="fileInput" />
+<pre id="log">Loading…</pre>
 </body>
 </html>
