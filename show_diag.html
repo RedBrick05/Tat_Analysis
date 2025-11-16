@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8" />
+<title>Show diag_result.json (webR)</title>
+<script type="module" src="https://webr.r-wasm.org/latest/webr.mjs"></script>
+<style>
+  body { font-family: monospace; white-space: pre-wrap; padding: 20px; }
+  #out { background: #f8f9fa; padding: 20px; border-radius: 8px; }
+</style>
+</head>
+
+<body>
+<h2>diag_result.json viewer</h2>
+<div id="out">Loading…</div>
+
+<script type="module">
+import { WebR } from "https://webr.r-wasm.org/latest/webr.mjs";
+
+const out = document.getElementById("out");
+const log = text => out.textContent += "\n" + text;
+
+async function showDiag() {
+    out.textContent = "Initializing webR…";
+
+    const webR = new WebR();
+    await webR.init();
+    log("\nwebR ready.");
+
+    // Ensure jsonlite exists
+    log("\nChecking jsonlite…");
+    let hasJson = false;
+    try {
+        await webR.evalR(`library(jsonlite)`);
+        hasJson = true;
+        log("jsonlite is available.");
+    } catch (e) {
+        log("jsonlite missing — installing…");
+        await webR.installPackages("jsonlite");
+        await webR.evalR(`library(jsonlite)`);
+        log("jsonlite installed.");
+    }
+
+    log("\nAttempting to read diag_result.json …");
+
+    try {
+        const r = await webR.evalR(`
+            if (file.exists('/home/web_user/tat_diag/diag_result.json')) {
+                paste(readLines('/home/web_user/tat_diag/diag_result.json'), collapse="\\n")
+            } else {
+                'ERROR: diag_result.json not found'
+            }
+        `);
+
+        const js = await r.toJs();
+        log("\n===== diag_result.json =====\n");
+        log(js);
+        log("\n===========================\n");
+
+    } catch (err) {
+        log("\n❌ ERROR reading diag_result.json:");
+        log(String(err));
+    }
+}
+
+showDiag();
+</script>
+
+</body>
+</html>
