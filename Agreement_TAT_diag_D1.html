@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Diagnostic D1 — Directory Listing</title>
+<script type="module" src="https://webr.r-wasm.org/latest/webr.mjs"></script>
+<style>
+  body { font-family: system-ui, sans-serif; margin:20px; }
+  #log { white-space: pre-wrap; background:#f3f4f6; padding:12px; border-radius:8px; height:250px; overflow:auto; }
+</style>
+</head>
+<body>
+
+<h1>Diagnostic D1 — Check Output Directory</h1>
+<input id="file" type="file" accept=".csv" />
+<div id="log">Initializing…</div>
+
+<script type="module">
+import { WebR } from "https://webr.r-wasm.org/latest/webr.mjs";
+
+const log = (msg) => {
+  const el = document.getElementById("log");
+  el.textContent += "\n" + msg;
+  el.scrollTop = el.scrollHeight;
+};
+
+(async function(){
+  log("Starting webR…");
+  const webR = new WebR();
+  await webR.init();
+  log("webR ready.");
+
+  document.getElementById("file").addEventListener("change", async (ev)=>{
+    const f = ev.target.files[0];
+    if(!f){ return; }
+
+    log("Uploading file…");
+    const ab = await f.arrayBuffer();
+    const path = "/home/web_user/tat_diag_test.csv";
+    const outdir = "/home/web_user/tat_diag/";
+
+    webR.FS.writeFile(path, new Uint8Array(ab));
+    log("File written to: " + path);
+
+    const r = `
+      suppressWarnings({
+        dir.create("${outdir}", showWarnings=FALSE, recursive=TRUE)
+        # Create a test file
+        writeLines("test content", paste0("${outdir}", "testfile.txt"))
+      })
+    `;
+    await webR.evalR(r);
+    log("R wrote a test file.");
+
+    log("Listing /home/web_user:");
+    try {
+      log(webR.FS.readdir("/home/web_user").join("\n"));
+    } catch(e){
+      log("ERROR listing /home/web_user: " + e);
+    }
+
+    log("Listing /home/web_user/tat_diag:");
+    try {
+      log(webR.FS.readdir("/home/web_user/tat_diag").join("\n"));
+    } catch(e){
+      log("ERROR listing diag dir: " + e);
+    }
+  });
+})();
+</script>
+
+</body>
+</html>
