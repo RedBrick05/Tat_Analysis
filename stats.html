@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Agreement TAT — Statistics (webR)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<script type="module" src="https://webr.r-wasm.org/latest/webr.mjs"></script>
+<style>
+ body{font-family:Inter,system-ui;margin:18px;color:#0f172a}
+ h1{margin:0 0 6px}
+ #status{background:#f8fafc;border:1px solid #e6eef6;padding:10px;border-radius:8px;white-space:pre-wrap;font-family:ui-monospace;max-height:160px;overflow:auto}
+ .controls{margin-top:12px;display:flex;gap:10px;align-items:center}
+ .card{background:#fff;border:1px solid #eef6ff;padding:12px;border-radius:8px;margin-top:12px}
+ button{padding:8px 12px;border-radius:6px;background:#2563eb;color:#fff;border:none;cursor:pointer}
+ a.link{display:inline-block;margin-left:8px;color:#10b981}
+</style>
+</head>
+<body>
+  <h1>Agreement TAT — Statistics</h1>
+  <div id="status">Initializing webR…</div>
+  <div class="controls">
+    <input id="csvFile" type="file" accept=".csv" />
+    <button id="runBtn" disabled>Run analyses</button>
+  </div>
+
+  <div id="results"></div>
+
+<script type="module">
+import { WebR } from "https://webr.r-wasm.org/latest/webr.mjs";
+const status = document.getElementById('status');
+const fileInput = document.getElementById('csvFile');
+const runBtn = document.getElementById('runBtn');
+const results = document.getElementById('results');
+
+function log(msg){ status.textContent += "\n" + msg; status.scrollTop = status.scrollHeight; console.log(msg); }
+
+let webR;
+async function init(){
+  webR = new WebR();
+  await webR.init();
+  log("✅ webR ready.");
+  const pkgs = ["dplyr","rstatix","jsonlite","stats","utils"];
+  for(const p of pkgs){
+    log(`📦 ensuring ${p}...`);
+    try { await webR.evalR(`library(${p})`); log(`   ✔ ${p} loaded`); }
+    catch(e){ log(`   ➜ installing ${p}...`); await webR.installPackages(p); log(`   ✔ ${p} installed`); }
+  }
+  runBtn.disabled = false;
+}
+init();
+
+fileInput.addEventListener('change', () => runBtn.disabled = !fileInput.files[0]);
+
+runBtn.addEventListener('click', async () => {
+  results.innerHTML = ''; log("\n📄 Reading CSV into R...");
+  const file = fileInput.files[0];
+  if(!file) return;
+  const text = await file.text();
+  const jsEscaped = JSON.stringify(text);
+
+  const rScript = `
+    suppressWarnings({
+      library(dplyr); library(rstatix); library(jsonlite); library(stats); library(utils)
+
+      txt <- ${jsEscaped}
+      tmp <- tempfile(fileext=".csv")
+      writeLines(txt, tmp)
+      df <- read.csv(tmp, stringsAsFactors=FALSE, check.names=FALSE, na.strings=c("","NA"))
+      names(df) <- trimws(names(df))
+
+      col_tat <- "Agreement Turn Around Time (TAT, days)"
+      col_type <- "Agreement Type"
+      col_legal <- "Legal Reference Number"
+      col_parties <- "Number of Related Parties"
+
+      df[[col_tat]] <- suppressWarnings(as.numeric(df[[col_tat]]))
+      df <- df %>% filter(!is.na(.data[[col_tat]]))
+
+      # summary function that returns data frame
+      summ_overall <- df %>% summarise(N=n(), Mean=mean(.data[[col_tat]], na.rm=TRUE), Median=median(.data[[col_tat]], na.rm=TRUE), SD=sd(.data[[col_tat]], na.rm=TRUE), SEM=sd(.data[[col_tat]], na.rm=TRUE)/sqrt(max(1,n()))) 
+
+      summ_by_type <- if(col_type %in% names(df)) df %>% group_by(.data[[col_type]]) %>% summarise(N=n(), Mean=mean(.data[[col_tat]], na.rm=TRUE), Median=median(.data[[col_tat]], na.rm=TRUE), SD=sd(.data[[col_tat]], na.rm=TRUE), SEM=SD/sqrt(N), .groups='drop') else data.frame()
+      summ_by_legal <- if(col_legal %in% names(df)) df %>% group_by(.data[[col_legal]]) %>% summarise(N=n(), Mean=mean(.data[[col_tat]], na.rm=TRUE), Median=median(.data[[col_tat]], na.rm=TRUE), SD=sd(.data[[col_tat]], na.rm=TRUE), SEM=SD/sqrt(N), .groups='drop') else data.frame()
+      summ_by_parties <- if(col_parties %in% names(df)) { df[[col_parties]] <- suppressWarnings(as.numeric(as.character(df[[col_parties]]))); df %>% group_by(.data[[col_parties]]) %>% summarise(N=n(), Mean=mean(.data[[col_tat]], na.rm=TRUE), Median=median(.data[[col_tat]], na.rm=TRUE), SD=sd(.data[[col_tat]], na.rm=TRUE), SEM=SD/sqrt(N), .groups='drop') } else data.frame()
+
+      # Parametric ANOVA by type
+      aov_type <- if(col_type %in% names(df) && length(unique(na.omit(df[[col_type]])))>1) { a <- aov(as.formula(paste0('`', col_tat, '` ~ `', col_type, '`')), data=df); as.data.frame(summary(a)[[1]]) } else data.frame()
+      # Tukey post-hoc
+      tuk_type <- tryCatch({ t <- TukeyHSD(aov(as.formula(paste0('`', col_tat, '` ~ `', col_type, '`')), data=df)); as.data.frame(t[[1]]) }, error=function(e) data.frame())
+
+      # Kruskal-Wallis and Dunn
+      kw_type <- if(col_type %in% names(df) && length(unique(na.omit(df[[col_type]])))>1) { as.data.frame(kruskal_test(df, as.formula(paste0('`', col_tat, '` ~ `', col_type, '`')))) } else data.frame()
+      dunn_type <- tryCatch(as.data.frame(dunn_test(df, as.formula(paste0('`', col_tat, '` ~ `', col_type, '`')), p.adjust.method='bonferroni')), error=function(e) data.frame())
+
+      # Legal tests (t and wilcox)
+      legal_ttest <- if(col_legal %in% names(df) && length(unique(na.omit(df[[col_legal]])))==2) as.data.frame(t_test(df, as.formula(paste0('`', col_tat, '` ~ `', col_legal, '`')))) else data.frame()
+      legal_wilcox <- if(col_legal %in% names(df) && length(unique(na.omit(df[[col_legal]])))>=2) as.data.frame(wilcox_test(df, as.formula(paste0('`', col_tat, '` ~ `', col_legal, '`')))) else data.frame()
+
+      # Correlations of parties against TAT
+      corr_spearman <- if(col_parties %in% names(df) && sum(!is.na(df[[col_parties]]))>2) as.data.frame(cor_test(df, formula = as.formula(paste0('`', col_parties, '` ~ `', col_tat, '`')), method='spearman')) else data.frame()
+      corr_pearson  <- if(col_parties %in% names(df) && sum(!is.na(df[[col_parties]]))>2) as.data.frame(cor_test(df, formula = as.formula(paste0('`', col_parties, '` ~ `', col_tat, '`')), method='pearson')) else data.frame()
+
+      # 3-way ANOVA
+      threeway <- data.frame()
+      if(col_type %in% names(df) && col_legal %in% names(df) && col_parties %in% names(df)){
+        try({
+          # ensure numeric parties
+          df[[col_parties]] <- suppressWarnings(as.numeric(as.character(df[[col_parties]])))
+          fmla <- as.formula(paste0('`', col_tat, '` ~ `', col_type, '` * `', col_legal, '` * `', col_parties, '`'))
+          a3 <- aov(fmla, data=df)
+          threeway <- as.data.frame(summary(a3)[[1]])
+        }, silent=TRUE)
+      }
+
+      # helper to export df to CSV string
+      df_to_csv <- function(d){
+        if(nrow(d)==0) return("")
+        tc <- textConnection(NULL, "w")
+        write.csv(d, tc, row.names=FALSE, na="")
+        val <- textConnectionValue(tc)
+        close(tc)
+        paste(val, collapse="\\n")
+      }
+
+      out <- list(
+        summary_overall = df_to_csv(summ_overall),
+        summary_by_type  = df_to_csv(summ_by_type),
+        summary_by_legal = df_to_csv(summ_by_legal),
+        summary_by_parties = df_to_csv(summ_by_parties),
+        aov_type_csv = df_to_csv(aov_type),
+        tukey_type_csv = df_to_csv(tuk_type),
+        kw_type_csv = df_to_csv(kw_type),
+        dunn_type_csv = df_to_csv(dunn_type),
+        legal_ttest_csv = df_to_csv(legal_ttest),
+        legal_wilcox_csv = df_to_csv(legal_wilcox),
+        corr_spearman_csv = df_to_csv(corr_spearman),
+        corr_pearson_csv = df_to_csv(corr_pearson),
+        threeway_aov_csv = df_to_csv(threeway)
+      )
+      toJSON(out, auto_unbox=TRUE)
+    })
+  `;
+
+  log("⏳ Running analyses in R (may take 20–60s)...");
+  try {
+    const rres = await webR.evalR(rScript);
+    const arr = await rres.toArray();
+    const json = arr[0];
+    const obj = JSON.parse(json);
+
+    // Build UI with download buttons for each CSV string
+    let html = '<div class="card"><h3>Generated CSV outputs</h3>';
+    for(const k of Object.keys(obj)){
+      const csvtext = obj[k] || "";
+      html += `<div style="margin-bottom:8px"><strong>${k}</strong> — ${csvtext.length>0 ? "available" : "no data" }`;
+      if(csvtext.length>0){
+        const blob = new Blob([csvtext], {type:"text/csv"});
+        const url = URL.createObjectURL(blob);
+        html += ` <a class="link" href="${url}" download="${k}.csv">⬇️ Download</a>`;
+      }
+      html += `</div>`;
+    }
+    html += '</div>';
+    results.innerHTML = html;
+    log("✅ Analyses complete.");
+  } catch(err){
+    log("❌ Error running analyses: " + (err && err.message ? err.message : String(err)));
+  }
+});
+</script>
+</body>
+</html>
