@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ultra Diagnostic Trace (webR)</title>
+<script type="module" src="https://webr.r-wasm.org/latest/webr.mjs"></script>
+<style>
+body { font-family: monospace; white-space: pre-wrap; padding: 20px; }
+#log { background:#f8fafc; padding:15px; border-radius:8px; border:1px solid #e2e8f0; }
+input { margin-top:12px; }
+</style>
+</head>
+
+<body>
+<h2>Ultra Minimal Diagnostic Trace</h2>
+<div id="log">Initializing…</div>
+<input type="file" id="fileInput" accept=".csv" />
+
+<script type="module">
+import { WebR } from "https://webr.r-wasm.org/latest/webr.mjs";
+
+const log = (msg) => {
+  document.getElementById("log").textContent += "\n" + msg;
+  console.log(msg);
+};
+
+log("Starting webR…");
+
+const webR = new WebR();
+await webR.init();
+log("webR ready.");
+
+document.getElementById("fileInput").addEventListener("change", async (ev) => {
+  
+  const file = ev.target.files[0];
+  if (!file) return;
+
+  log("\nUploading: " + file.name);
+
+  // Read file bytes
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  log("File size (bytes): " + bytes.length);
+
+  // Write to FS
+  const path = "/uploaded.csv";
+  try {
+    webR.FS.writeFile(path, bytes);
+    log("✔ Wrote file to " + path);
+  } catch (e) {
+    log("❌ FS write error: " + e);
+    return;
+  }
+
+  // Read it back raw
+  try {
+    const raw = webR.FS.readFile(path);
+    log("\n✔ FS readFile length: " + raw.length);
+    log("\nRAW BYTES (first 500):\n" + raw.slice(0,500));
+  } catch (e) {
+    log("\n❌ FS read error: " + e);
+  }
+
+  // Try R readLines
+  log("\nCalling R readLines…");
+
+  try {
+    const rRes = await webR.evalR(`
+      x <- try(readLines("${path}", warn=FALSE), silent=TRUE)
+      if (inherits(x, "try-error")) {
+        paste("ERROR:", as.character(x))
+      } else {
+        paste(head(x, 20), collapse="\\n")
+      }
+    `);
+
+    const text = await rRes.toString();
+    log("\nR RESULT:\n" + text);
+
+  } catch (e) {
+    log("\n❌ R execution error:");
+    log(String(e));
+  }
+});
+</script>
+
+</body>
+</html>
