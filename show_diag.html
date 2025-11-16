@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8" />
+<title>Raw diag_result.json Viewer</title>
+<script type="module" src="https://webr.r-wasm.org/latest/webr.mjs"></script>
+<style>
+  body { font-family: monospace; white-space: pre-wrap; padding: 20px; }
+  #out { background: #f8f9fa; padding: 20px; border-radius: 8px; }
+</style>
+</head>
+
+<body>
+<h2>RAW diag_result.json viewer</h2>
+<div id="out">Initializing…</div>
+
+<script type="module">
+import { WebR } from "https://webr.r-wasm.org/latest/webr.mjs";
+
+const out = document.getElementById("out");
+const log = m => out.textContent += "\n" + m;
+
+async function run() {
+    out.textContent = "Initializing webR…";
+
+    const webR = new WebR();
+    await webR.init();
+    log("webR ready.");
+
+    log("\nReading raw file…");
+
+    try {
+        // Read raw bytes
+        const bytes = await webR.FS.readFile("/home/web_user/tat_diag/diag_result.json");
+        const text = new TextDecoder("utf-8").decode(bytes);
+
+        log("\n===== RAW FILE CONTENT =====\n");
+        log(text);
+        log("\n============================\n");
+
+    } catch (err) {
+        log("\n❌ ERROR reading file:");
+        log(String(err));
+    }
+}
+
+run();
+</script>
+</body>
+</html>
