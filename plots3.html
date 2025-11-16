@@ -1,149 +1,154 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
+<meta charset="utf-8" />
 <title>Agreement TAT — Violin Plots</title>
 <script type="module" src="https://webr.r-wasm.org/latest/webr.mjs"></script>
 
 <style>
-body { font-family: Arial, sans-serif; margin: 20px; }
-#status { white-space: pre-wrap; background: #f4f4f4; padding: 10px; border-radius: 6px; }
-.plot-box { margin-top: 20px; padding: 10px; border: 1px solid #ddd; border-radius: 6px; }
+  body{font-family:system-ui,Arial;margin:20px;}
+  #status{white-space:pre-wrap;background:#f5f5f5;padding:10px;border-radius:8px;}
+  .plot{margin-top:20px;border:1px solid #ddd;padding:10px;border-radius:8px;}
+  button{padding:8px 14px;border-radius:6px;border:none;background:#2563eb;color:white;}
 </style>
 </head>
 
 <body>
-<h2>Agreement TAT — Violin Plots</h2>
+<h1>Agreement TAT — Violin Plots</h1>
 
-<div id="status">Initializing webR…</div>
-<br>
+<div id="status">Initializing WebR…</div>
 
-<input type="file" id="csvFile" accept=".csv">
-<button id="runBtn" disabled>Generate plots</button>
+<input type="file" id="csvFile" accept=".csv" />
+<button id="runBtn" disabled>Generate Plots</button>
 
 <div id="plots"></div>
 
 <script type="module">
 import { WebR } from "https://webr.r-wasm.org/latest/webr.mjs";
 
-const status = document.getElementById("status");
-const runBtn = document.getElementById("runBtn");
-const plotsDiv = document.getElementById("plots");
-
-function log(msg){
-    status.textContent += "\n" + msg;
-}
+const log = msg => {
+  const st = document.getElementById("status");
+  st.textContent += "\\n" + msg;
+  console.log(msg);
+};
 
 let webR;
 
 async function init(){
-    webR = new WebR();
-    await webR.init();
-    log("webR ready.");
+  webR = new WebR();
+  await webR.init();
+  log("WebR ready.");
 
-    for (let pkg of ["ggplot2", "dplyr", "patchwork", "jsonlite"]) {
-        try {
-            await webR.evalR(`library(${pkg})`);
-            log(`✔ ${pkg} loaded`);
-        } catch {
-            log(`Installing ${pkg}…`);
-            await webR.installPackages(pkg);
-        }
+  for(const pkg of ["ggplot2","dplyr","patchwork","jsonlite"]){
+    try{
+      await webR.evalR(`suppressWarnings(library(${pkg}))`);
+      log(`✔ Loaded ${pkg}`);
+    } catch(e){
+      log(`Installing ${pkg}...`);
+      await webR.installPackages(pkg);
+      log(`✔ Installed ${pkg}`);
     }
+  }
 
-    runBtn.disabled = false;
+  document.getElementById("runBtn").disabled = false;
 }
-init();
 
-document.getElementById("csvFile").addEventListener("change", () => {
-    runBtn.disabled = false;
-});
+await init();
 
-runBtn.addEventListener("click", async () => {
 
-    const file = document.getElementById("csvFile").files[0];
-    const text = await file.text();
 
-    const escaped = text
-        .replace(/\\/g, "\\\\")
-        .replace(/"/g, '\\"')
-        .replace(/\n/g, "\\n");
+document.getElementById("runBtn").onclick = async () => {
+  const file = document.getElementById("csvFile").files[0];
+  if(!file){ alert("Choose a CSV file first."); return; }
 
-    const rCode = `
-        library(ggplot2); library(dplyr); library(patchwork); library(jsonlite)
+  const text = await file.text();
+  const jsText = JSON.stringify(text);  // escape safely for R
 
-        txt <- "${escaped}"
-        tmp <- tempfile(fileext=".csv")
-        writeLines(txt, tmp)
+  log("Reading CSV and generating plots…");
 
-        df <- read.csv(tmp, stringsAsFactors=FALSE, check.names=FALSE, na.strings=c("","NA"))
-        names(df) <- trimws(names(df))
+  const rCode = `
+suppressWarnings({
+  library(ggplot2); library(dplyr); library(patchwork); library(jsonlite)
 
-        tat <- "Agreement Turn Around Time (TAT, days)"
-        type <- "Agreement Type"
-        legal <- "Legal Reference Number"
-        parties <- "Number of Related Parties"
+  txt <- ${jsText}
+  tmp <- tempfile(fileext=".csv")
+  writeLines(txt, tmp)
 
-        df[[tat]] <- suppressWarnings(as.numeric(df[[tat]]))
-        df <- df %>% filter(!is.na(.data[[tat]]))
+  df <- read.csv(tmp, stringsAsFactors=FALSE, check.names=FALSE, na.strings=c("", "NA"))
+  names(df) <- trimws(names(df))
 
-        make_svg <- function(data, xvar, yvar, title, ylim=NULL){
-            xq <- paste0("`", xvar, "`")
-            yq <- paste0("`", yvar, "`")
+  tat <- "Agreement Turn Around Time (TAT, days)"
+  type <- "Agreement Type"
+  legal <- "Legal Reference Number"
+  parties <- "Number of Related Parties"
 
-            p <- ggplot(data, aes_string(x=xq, y=yq)) +
-                 geom_violin(alpha=.6) +
-                 geom_jitter(width=0.15, alpha=.4) +
-                 stat_summary(fun=median, geom="point", shape=23, size=3, fill="red") +
-                 theme_minimal() +
-                 labs(title=title)
+  df[[tat]] <- suppressWarnings(as.numeric(df[[tat]]))
+  df <- df %>% filter(!is.na(.data[[tat]]))
 
-            if (!is.null(ylim)) p <- p + coord_cartesian(ylim=ylim)
+  make_svg <- function(data, xvar, yvar, title, ylim=NULL){
+    xq <- paste0("\\\`", xvar, "\\\`")
+    yq <- paste0("\\\`", yvar, "\\\`")
 
-            fn <- tempfile(fileext=".svg")
-            ggsave(fn, p, device="svg", width=8, height=4)
-            paste(readLines(fn), collapse="\\n")
-        }
+    p <- ggplot(data, aes_string(x=xq, y=yq)) +
+         geom_violin(alpha=.6, trim=TRUE) +
+         geom_jitter(width=0.15, alpha=.4, size=.8) +
+         stat_summary(fun=median, geom="point", shape=23, size=3, fill="red") +
+         stat_summary(fun=mean, geom="point", shape=21, size=3, fill="white") +
+         labs(title=title, x="", y="TAT (days)") +
+         theme_minimal() +
+         theme(axis.text.x=element_text(angle=45, hjust=1))
 
-        out <- list()
-        out$full <- make_svg(df, "All", tat, "TAT — All Agreements")
+    if(!is.null(ylim)) p <- p + coord_cartesian(ylim=ylim)
 
-        if (type %in% names(df))
-            out$by_type <- make_svg(df, type, tat, "TAT by Agreement Type")
+    fn <- tempfile(fileext=".svg")
+    ggsave(fn, p, device="svg", width=10, height=4)
+    paste(readLines(fn, warn=FALSE), collapse="\\n")
+  }
 
-        if (legal %in% names(df))
-            out$by_legal <- make_svg(df, legal, tat, "TAT by Legal Reference")
+  out <- list()
+  out$full <- make_svg(df, "All", tat, "TAT - All Agreements")
 
-        if (parties %in% names(df)) {
-            df2 <- df
-            df2[[parties]] <- suppressWarnings(as.numeric(df2[[parties]]))
-            df2 <- df2 %>% filter(!is.na(.data[[parties]]))
-            df2[[parties]] <- factor(df2[[parties]], levels=sort(unique(df2[[parties]])))
-            out$by_parties <- make_svg(df2, parties, tat, "TAT by Related Parties")
-        }
+  if(type %in% names(df))
+    out$by_type <- make_svg(df, type, tat, "TAT by Agreement Type")
 
-        out$days_0_100 <- make_svg(df %>% filter(.data[[tat]]>=0 & .data[[tat]]<=100), "All", tat, "0–100 Days", c(0,100))
-        out$log <- make_svg(df %>% mutate(TAT_log=log10(.data[[tat]]+1)), "All", "TAT_log", "Log Transformed")
-        out$days_0_59 <- make_svg(df %>% filter(.data[[tat]]>=0 & .data[[tat]]<=59), "All", tat, "0–59 Days", c(0,59))
+  if(legal %in% names(df))
+    out$by_legal <- make_svg(df, legal, tat, "TAT by Legal Reference Number")
 
-        jsonlite::toJSON(out, auto_unbox=TRUE)
-    `;
+  if(parties %in% names(df)){
+    df2 <- df
+    df2[[parties]] <- suppressWarnings(as.numeric(as.character(df2[[parties]])))
+    df2 <- df2 %>% filter(!is.na(.data[[parties]]))
+    df2[[parties]] <- factor(df2[[parties]], levels=sort(unique(df2[[parties]])))
+    out$by_parties <- make_svg(df2, parties, tat, "TAT by Number of Related Parties")
+  }
 
+  toJSON(out, auto_unbox=TRUE)
+})
+`;
+
+  try{
+    const res = await webR.evalR(rCode);
+    const arr = await res.toArray();
+    const output = JSON.parse(arr[0]);
+
+    const plotsDiv = document.getElementById("plots");
     plotsDiv.innerHTML = "";
-    log("⏳ Running R…");
 
-    const result = await webR.evalR(rCode);
-    const out = JSON.parse(await result.toString());
-
-    for (const key in out) {
-        const box = document.createElement("div");
-        box.className = "plot-box";
-        box.innerHTML = `<h3>${key.replace(/_/g," ")}</h3>${out[key]}`;
-        plotsDiv.appendChild(box);
+    for(const key in output){
+      const svg = output[key];
+      const div = document.createElement("div");
+      div.className = "plot";
+      div.innerHTML = `<h3>${key}</h3>` + svg;
+      plotsDiv.appendChild(div);
     }
 
-    log("✔ Done.");
-});
+    log("✔ Plots generated.");
+  }
+  catch(err){
+    log("❌ ERROR: " + err.message);
+  }
+};
+
 </script>
 </body>
 </html>
