@@ -18,22 +18,19 @@
 import { WebR } from "https://webr.r-wasm.org/latest/webr.mjs";
 
 const out = document.getElementById("out");
-const log = text => out.textContent += "\n" + text;
+const log = msg => out.textContent += "\n" + msg;
 
 async function showDiag() {
     out.textContent = "Initializing webR…";
-
     const webR = new WebR();
     await webR.init();
     log("\nwebR ready.");
 
-    // Ensure jsonlite exists
+    // Ensure jsonlite is available
     log("\nChecking jsonlite…");
-    let hasJson = false;
     try {
         await webR.evalR(`library(jsonlite)`);
-        hasJson = true;
-        log("jsonlite is available.");
+        log("jsonlite available.");
     } catch (e) {
         log("jsonlite missing — installing…");
         await webR.installPackages("jsonlite");
@@ -41,21 +38,25 @@ async function showDiag() {
         log("jsonlite installed.");
     }
 
-    log("\nAttempting to read diag_result.json …");
+    log("\nAttempting to load diag_result.json …");
 
     try {
         const r = await webR.evalR(`
-            if (file.exists('/home/web_user/tat_diag/diag_result.json')) {
-                paste(readLines('/home/web_user/tat_diag/diag_result.json'), collapse="\\n")
-            } else {
+            if (!file.exists('/home/web_user/tat_diag/diag_result.json')) {
                 'ERROR: diag_result.json not found'
+            } else {
+                jsonlite::toJSON(
+                    jsonlite::fromJSON('/home/web_user/tat_diag/diag_result.json'),
+                    pretty = TRUE,
+                    auto_unbox = TRUE
+                )
             }
         `);
 
         const js = await r.toJs();
         log("\n===== diag_result.json =====\n");
         log(js);
-        log("\n===========================\n");
+        log("\n=============================\n");
 
     } catch (err) {
         log("\n❌ ERROR reading diag_result.json:");
