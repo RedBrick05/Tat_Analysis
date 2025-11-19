@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Agreement TAT — Violin Plots (Clean)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<script type="module" src="https://webr.r-wasm.org/latest/webr.mjs"></script>
+<style>
+ body { font-family: Inter, system-ui, Segoe UI, Roboto, Arial; margin: 18px; color: #0f172a; }
+ h1 { margin: 0 0 6px; }
+ #status { background:#f8fafc;border:1px solid #e6eef6;padding:12px;border-radius:8px;
+          white-space:pre-wrap;font-family:ui-monospace, Menlo, monospace;
+          max-height:260px;overflow:auto }
+ .controls { margin-top:12px; display:flex; gap:10px; align-items:center }
+ .plots { margin-top:16px; display:flex; flex-direction:column; gap:16px }
+ .plot-card { background:#fff;border:1px solid #eef6ff;padding:12px;border-radius:8px }
+ button { padding:8px 12px;border-radius:6px;background:#2563eb;color:white;border:none;cursor:pointer }
+ a.btn { display:inline-block;margin-left:8px;padding:6px 10px;background:#10b981;color:white;border-radius:6px;text-decoration:none }
+ .err { color:#b91c1c;white-space:pre-wrap;margin-top:8px;font-weight:bold }
+</style>
+</head>
+
+<body>
+<h1>Agreement TAT — Violin Plots</h1>
+<div id="status">Initializing…</div>
+<div class="controls">
+  <input id="csvFile" type="file" accept=".csv" />
+  <button id="runBtn" disabled>Generate plots</button>
+</div>
+<div id="plots" class="plots"></div>
+
+<script type="module">
+import { WebR } from "https://webr.r-wasm.org/latest/webr.mjs";
+
+const status = document.getElementById('status');
+const fileInput = document.getElementById('csvFile');
+const runBtn = document.getElementById('runBtn');
+const plotsDiv = document.getElementById('plots');
+
+function log(msg){ status.textContent += "\n" + msg; status.scrollTop = status.scrollHeight; }
+function clearStatus(){ status.textContent = ''; }
+
+let webR;
+
+async function init(){
+  clearStatus();
+  log("Initializing webR...");
+  webR = new WebR();
+  await webR.init();
+  log("✅ webR ready.");
+
+  const pkgs = ["ggplot2","dplyr","patchwork","jsonlite"];
+  for(const p of pkgs){
+    log(`📦 Checking ${p}...`);
+    try {
+      await webR.evalR(`suppressWarnings(library(${p}))`);
+      log(`   ✔ ${p} ready.`);
+    } catch {
+      log(`   ➜ Installing ${p}...`);
+      await webR.installPackages(p);
+      await webR.evalR(`library(${p})`);
+      log(`   ✔ ${p} installed.`);
+    }
+  }
+
+  log("\nReady for CSV upload.");
+  runBtn.disabled = false;
+}
+
+init();
+
+fileInput.addEventListener('change',()=> runBtn.disabled = !fileInput.files[0]);
+
+runBtn.addEventListener('click', async ()=>{
+  plotsDiv.innerHTML='';
+  clearStatus();
+  log("📄 Reading CSV file...");
+
+  const f = fileInput.files[0];
+  if(!f){ log("❌ No file selected."); return; }
+
+  const text = await f.text();
+  const jsText = JSON.stringify(text);
+
+  log("⏳ Running R plotting script...");
+
+  const rScript = `
+suppressWarnings({
+  library(ggplot2); library(dplyr); library(patchwork); library(jsonlite)
+  txt <- ${jsText}
+  tmp <- tempfile(fileext='.csv')
+  writeLines(txt,tmp)
+  df <- read.csv(tmp,stringsAsFactors=FALSE,check.names=FALSE,na.strings=c('','NA'))
+  names(df) <- trimws(names(df))
+
+  tat <- "Agreement Turn Around Time (TAT, days)"
+  type <- "Agreement Type"
+  legal <- "Legal Reference Number"
+  parties <- "Number of Related Parties"
+
+  df[[tat]] <- suppressWarnings(as.numeric(df[[tat]]))
+  df <- df %>% filter(!is.na(.data[[tat]]))
+
+  make_svg <- function(data,x,y,title,ylim=NULL){
+    p <- ggplot(data, aes_string(x=x, y=y)) +
+         geom_violin(alpha=.6,trim=TRUE) +
+         geom_jitter(width=.15,alpha=.4,size=.8) +
+         stat_summary(fun=median,geom='point',shape=23,size=3,fill='red') +
+         stat_summary(fun=mean,geom='point',shape=21,size=3,fill='white') +
+         labs(title=title,x='',y='TAT (days)') + theme_minimal() +
+         theme(axis.text.x=element_text(angle=45,hjust=1))
+    if(!is.null(ylim)) p <- p + coord_cartesian(ylim=ylim)
+    f <- tempfile(fileext='.svg')
+    svg(f,width=10,height=4); print(p); dev.off()
+    paste(readLines(f,warn=FALSE),collapse='\n')
+  }
+
+  out <- list()
+  out$full <- make_svg(df, "'All'", paste0('`',tat,'`'), 'TAT — All Agreements')
+
+  if(type %in% names(df)) out$by_type <- make_svg(df,paste0('`',type,'`'),paste0('`',tat,'`'),'TAT by Agreement Type')
+  if(legal %in% names(df)) out$by_legal <- make_svg(df,paste0('`',legal,'`'),paste0('`',tat,'`'),'TAT by Legal Reference')
+
+  if(parties %in% names(df)){
+    df2 <- df
+    df2[[parties]] <- suppressWarnings(as.numeric(as.character(df2[[parties]])))
+    df2 <- df2 %>% filter(!is.na(.data[[parties]]))
+    df2[[parties]] <- factor(df2[[parties]], levels=sort(unique(df2[[parties]])))
+    out$by_parties <- make_svg(df2,paste0('`',parties,'`'),paste0('`',tat,'`'),'TAT by Related Parties')
+  }
+
+  toJSON(out,auto_unbox=TRUE)
+})
+`;
+
+  try{
+    const rres = await webR.evalR(rScript);
+    const arr = await rres.toArray();
+    const json = arr[0];
+    const obj = JSON.parse(json);
+
+    for(const key of Object.keys(obj)){
+      const card = document.createElement('div'); card.className='plot-card';
+      const h = document.createElement('h3'); h.textContent = key.replace(/_/g,' ');
+      card.appendChild(h);
+
+      const val = obj[key];
+      if(val.startsWith('R_error::')){
+        const e=document.createElement('div'); e.className='err'; e.textContent=val;
+        card.appendChild(e);
+      } else {
+        const svgDiv=document.createElement('div'); svgDiv.innerHTML=val;
+        card.appendChild(svgDiv);
+        const blob=new Blob([val],{type:'image/svg+xml'});
+        const url=URL.createObjectURL(blob);
+        const a=document.createElement('a'); a.href=url; a.download=`${key}.svg`; a.textContent='⬇️ Download SVG'; a.className='btn';
+        card.appendChild(a);
+      }
+      plotsDiv.appendChild(card);
+    }
+
+    log("✔ Plotting complete.");
+  } catch(err){ log("❌ R error: " + err.message); }
+});
+</script>
+</body>
+</html>
