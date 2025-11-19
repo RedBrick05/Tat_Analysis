@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Agreement TAT — Violin Plots (stable build)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<script type="module" src="https://webr.r-wasm.org/latest/webr.mjs"></script>
+
+<style>
+  body{font-family:Inter,system-ui,Segoe UI,Roboto,Arial;margin:18px;color:#0f172a}
+  h1{margin:0 0 6px}
+  #status{background:#f8fafc;border:1px solid #e6eef6;padding:12px;border-radius:8px;
+           white-space:pre-wrap;font-family:ui-monospace, Menlo, monospace;
+           max-height:260px;overflow:auto}
+  .controls{margin-top:12px;display:flex;gap:10px;align-items:center}
+  .plots{margin-top:16px;display:flex;flex-direction:column;gap:16px}
+  .plot-card{background:#fff;border:1px solid #eef6ff;padding:12px;border-radius:8px}
+  button{padding:8px 12px;border-radius:6px;background:#2563eb;color:#fff;border:none;cursor:pointer}
+  a.btn{display:inline-block;margin-left:8px;padding:6px 10px;background:#10b981;color:white;border-radius:6px;text-decoration:none}
+  .err{color:#b91c1c;font-weight:700;white-space:pre-wrap;margin-top:8px}
+</style>
+</head>
+
+<body>
+<h1>Agreement TAT — Violin Plots (stable)</h1>
+
+<div id="status">Initializing…</div>
+
+<div class="controls">
+  <input id="csvFile" type="file" accept=".csv" />
+  <button id="runBtn" disabled>Generate plots</button>
+</div>
+
+<div id="plots" class="plots"></div>
+
+<script type="module">
+
+import { WebR } from "https://webr.r-wasm.org/latest/webr.mjs";
+
+const status = document.getElementById("status");
+const runBtn = document.getElementById("runBtn");
+const fileInput = document.getElementById("csvFile");
+const plotsDiv = document.getElementById("plots");
+
+function log(msg){
+  status.textContent += "\n" + msg;
+  status.scrollTop = status.scrollHeight;
+  console.log(msg);
+}
+
+let webR = null;
+
+async function initWebR(){
+  status.textContent = "Initializing webR…";
+  webR = new WebR();
+  await webR.init();
+  log("✅ webR ready.");
+
+  for (const pkg of ["ggplot2","dplyr","patchwork","jsonlite"]){
+    log(`📦 Ensuring ${pkg}...`);
+    try {
+      await webR.installPackages(pkg);
+      await webR.evalR(`library(${pkg})`);
+      log(`   ✔ ${pkg} ready.`);
+    } catch (e){
+      log(`   ❌ Failed loading ${pkg}: ${e.message}`);
+    }
+  }
+
+  log("\nReady for file upload.");
+  runBtn.disabled = false;
+}
+
+initWebR();
+
+runBtn.addEventListener("click", async () => {
+  plotsDiv.innerHTML = "";
+  status.textContent = "Processing…";
+
+  const file = fileInput.files[0];
+  if (!file){ log("❌ No file selected."); return; }
+
+  const csvText = await file.text();
+  const safeText = JSON.stringify(csvText);   // Always safe
+
+  log("📄 Sending CSV into R…");
+
+  // Build R script safely as array of lines
+  const rLines = [
+    "suppressWarnings({",
+    "library(ggplot2); library(dplyr); library(patchwork); library(jsonlite)",
+    `txt <- ${safeText}`,
+    "tmp <- tempfile(fileext='.csv')",
+    "writeLines(txt, tmp)",
+    "df <- read.csv(tmp, stringsAsFactors=FALSE, check.names=FALSE, na.strings=c('','NA'))",
+    "names(df) <- trimws(names(df))",
+    "tat <- 'Agreement Turn Around Time (TAT, days)'",
+    "type <- 'Agreement Type'",
+    "legal <- 'Legal Reference Number'",
+    "parties <- 'Number of Related Parties'",
+    "df[[tat]] <- suppressWarnings(as.numeric(df[[tat]]))",
+    "df <- df %>% filter(!is.na(.data[[tat]]))",
+    "",
+    "make_svg <- function(data, x, y, title, ylim=NULL){",
+    "  p <- ggplot(data, aes_string(x=x, y=y)) +",
+    "       geom_violin(alpha=.6) + geom_jitter(width=.15, alpha=.4, size=.8) +",
+    "       stat_summary(fun=median, geom='point', shape=23, size=3, fill='red') +",
+    "       stat_summary(fun=mean, geom='point', shape=21, size=3, fill='white') +",
+    "       labs(title=title, x='', y='TAT (days)') + theme_minimal()",
+    "  if(!is.null(ylim)) p <- p + coord_cartesian(ylim=ylim)",
+    "  f <- tempfile(fileext='.svg')",
+    "  svg(f, width=10, height=4); print(p); dev.off()",
+    "  paste(readLines(f), collapse='\\n')",
+    "}",
+    "",
+    "out <- list()",
+    "out$full <- make_svg(df, 'All', tat, 'TAT — All Agreements')",
+    "if(type %in% names(df)) out$by_type <- make_svg(df, type, tat, 'TAT by Agreement Type')",
+    "if(legal %in% names(df)) out$by_legal <- make_svg(df, legal, tat, 'TAT by Legal Reference Number')",
+    "if(parties %in% names(df)){",
+    "  df2 <- df; df2[[parties]] <- as.numeric(df2[[parties]])",
+    "  df2 <- df2 %>% filter(!is.na(.data[[parties]]))",
+    "  df2[[parties]] <- factor(df2[[parties]])",
+    "  out$by_parties <- make_svg(df2, parties, tat, 'TAT by Number of Related Parties')",
+    "}",
+    "toJSON(out, auto_unbox=TRUE)",
+    "})"
+  ];
+
+  const rScript = rLines.join("\n");
+  let rOutput;
+
+  try {
+    const result = await webR.evalR(rScript);
+    const arr = await result.toArray();
+    rOutput = JSON.parse(arr[0]);
+  } catch (e){
+    log("❌ R execution error: "+e.message);
+    return;
+  }
+
+  log("Rendering plots…");
+
+  for (const key of Object.keys(rOutput)){
+    const svg = rOutput[key];
+    const card = document.createElement("div");
+    card.className = "plot-card";
+    const h = document.createElement("h3");
+    h.textContent = key.replace(/_/g," ");
+    card.appendChild(h);
+
+    if (svg.startsWith("R_error::")){
+      const err = document.createElement("div");
+      err.className = "err";
+      err.textContent = svg;
+      card.appendChild(err);
+    } else {
+      const div = document.createElement("div");
+      div.innerHTML = svg;
+      card.appendChild(div);
+      const blob = new Blob([svg], {type:"image/svg+xml"});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = key+".svg"; a.textContent="⬇ Download SVG";
+      a.className = "btn";
+      card.appendChild(a);
+    }
+    plotsDiv.appendChild(card);
+  }
+
+  log("✅ Done.");
+});
+</script>
+</body>
+</html>
