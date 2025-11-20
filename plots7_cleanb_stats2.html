@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Agreement TAT — Statistical Summary</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<script type="module" src="https://webr.r-wasm.org/latest/webr.mjs"></script>
+
+<style>
+ body { font-family: Inter, Arial, system-ui; margin:20px; color:#0f172a; }
+ h1 { margin-bottom:10px; }
+ #status { background:#f8fafc;border:1px solid #e2e8f0;padding:12px;border-radius:8px;
+          white-space:pre-wrap;font-family:ui-monospace, Menlo, monospace;
+          max-height:250px;overflow:auto; }
+ .controls { margin-top:12px; display:flex; gap:12px; align-items:center; }
+ .card { background:white;border:1px solid #e2e8f0;padding:16px;border-radius:10px;margin-top:18px; }
+ table { border-collapse: collapse; margin-top:10px; width:100%; }
+ th, td { border:1px solid #e2e8f0; padding:6px 8px; text-align:left; }
+ th { background:#f1f5f9; }
+ pre { background:#f8fafc;padding:10px;border-radius:8px;border:1px solid #e2e8f0; }
+ button { padding:8px 12px; border-radius:6px; background:#2563eb; color:white; border:none; cursor:pointer; }
+</style>
+</head>
+
+<body>
+<h1>Agreement TAT — Descriptive & Analytical Statistics</h1>
+
+<div id="status">Initializing…</div>
+
+<div class="controls">
+ <input id="csvFile" type="file" accept=".csv" />
+ <button id="runBtn" disabled>Run Statistics</button>
+</div>
+
+<div id="output"></div>
+
+<script type="module">
+import { WebR } from "https://webr.r-wasm.org/latest/webr.mjs";
+
+const status = document.getElementById("status");
+const output = document.getElementById("output");
+const fileInput = document.getElementById("csvFile");
+const runBtn = document.getElementById("runBtn");
+
+function log(msg){ status.textContent += "\\n" + msg; status.scrollTop = status.scrollHeight; }
+function clearStatus(){ status.textContent = ""; }
+
+let webR;
+
+async function init(){
+  clearStatus();
+  log("Initializing webR...");
+  webR = new WebR();
+  await webR.init();
+  log("✔ webR ready.");
+
+  const pkgs = ["ggplot2","dplyr","jsonlite"];
+  for (const p of pkgs){
+    try {
+      log(`Checking ${p}...`);
+      await webR.evalR(`suppressWarnings(library(${p}))`);
+      log(`   ✔ ${p} loaded`);
+    } catch {
+      log(`   Installing ${p}...`);
+      await webR.installPackages(p);
+      await webR.evalR(`library(${p})`);
+      log(`   ✔ ${p} installed & loaded`);
+    }
+  }
+
+  log("\\nReady for CSV upload.");
+  runBtn.disabled = false;
+}
+
+init();
+
+fileInput.addEventListener("change",()=> runBtn.disabled = !fileInput.files[0]);
+
+runBtn.addEventListener("click", async ()=>{
+
+  output.innerHTML = "";
+  clearStatus();
+  log("Reading CSV…");
+
+  const file = fileInput.files[0];
+  if(!file){ log("No file selected."); return; }
+
+  const text = await file.text();
+  const jsText = JSON.stringify(text);
+
+  log("Running R statistics…");
+
+  // ----------------------------------------------------
+  // OPTION B — BUILD R SCRIPT SAFELY AS ARRAY OF LINES
+  // ----------------------------------------------------
+  const rLines = [
+    "suppressWarnings({",
+    " library(ggplot2); library(dplyr); library(jsonlite)",
+    " txt <- " + jsText,
+    " tmp <- tempfile(fileext='.csv')",
+    " writeLines(txt, tmp)",
+    " df <- read.csv(tmp, stringsAsFactors=FALSE, check.names=FALSE, na.strings=c('', 'NA'))",
+    " names(df) <- trimws(names(df))",
+
+    " tat <- 'Agreement Turn Around Time (TAT, days)'",
+    " type <- 'Agreement Type'",
+    " legal <- 'Legal Reference Number'",
+    " parties <- 'Number of Related Parties'",
+
+    " df[[tat]] <- suppressWarnings(as.numeric(df[[tat]]))",
+    " df <- df %>% filter(!is.na(.data[[tat]]))",
+
+    " summary_table <- df %>% summarise(",
+    "   n = n(),",
+    "   mean = mean(.data[[tat]], na.rm=TRUE),",
+    "   median = median(.data[[tat]], na.rm=TRUE),",
+    "   sd = sd(.data[[tat]], na.rm=TRUE),",
+    "   min = min(.data[[tat]], na.rm=TRUE),",
+    "   max = max(.data[[tat]], na.rm=TRUE)",
+    " )",
+
+    " group_type <- if(type %in% names(df)) df %>% group_by(.data[[type]]) %>% summarise(n=n(), mean=mean(.data[[tat]]), median=median(.data[[tat]])) else NULL",
+    " group_legal <- if(legal %in% names(df)) df %>% group_by(.data[[legal]]) %>% summarise(n=n(), mean=mean(.data[[tat]]), median=median(.data[[tat]])) else NULL",
+    " group_party <- if(parties %in% names(df)) df %>% group_by(.data[[parties]]) %>% summarise(n=n(), mean=mean(.data[[tat]]), median=median(.data[[tat]])) else NULL",
+
+    " shapiro <- try(shapiro.test(df[[tat]]), silent=TRUE)",
+
+    " out <- list(",
+    "   summary = summary_table,",
+    "   group_type = group_type,",
+    "   group_legal = group_legal,",
+    "   group_party = group_party,",
+    "   shapiro = if(inherits(shapiro,'try-error')) 'Error in normality test' else capture.output(print(shapiro))",
+    " )",
+
+    " toJSON(out, auto_unbox=TRUE)",
+    "})"
+  ];
+
+  const rScript = rLines.join("\n");
+
+  try {
+    const result = await webR.evalR(rScript);
+    const arr = await result.toArray();
+    const json = arr[0];
+    const obj = JSON.parse(json);
+
+    renderStats(obj);
+
+    log("✔ Statistics complete.");
+
+  } catch (err){
+    log("❌ R error: " + err.message);
+  }
+
+});
+
+// --------------------------------------------------------
+// HTML RENDERING
+// --------------------------------------------------------
+function renderStats(obj){
+  output.innerHTML = "";
+
+  function card(title, html){
+    const div = document.createElement("div");
+    div.className = "card";
+    div.innerHTML = `<h2>${title}</h2>${html}`;
+    output.appendChild(div);
+  }
+
+  // Summary
+  if(obj.summary){
+    const s = obj.summary;
+    card("Overall Summary",
+      `<table>
+         <tr><th>N</th><td>${s.n}</td></tr>
+         <tr><th>Mean</th><td>${s.mean.toFixed(2)}</td></tr>
+         <tr><th>Median</th><td>${s.median.toFixed(2)}</td></tr>
+         <tr><th>SD</th><td>${s.sd.toFixed(2)}</td></tr>
+         <tr><th>Min</th><td>${s.min}</td></tr>
+         <tr><th>Max</th><td>${s.max}</td></tr>
+       </table>`
+    );
+  }
+
+  // Group tables
+  function renderGroup(title, g){
+    if(!g) return;
+    let rows = g.map(r =>
+      `<tr><td>${Object.values(r)[0]}</td><td>${r.n}</td><td>${r.mean.toFixed(2)}</td><td>${r.median.toFixed(2)}</td></tr>`
+    ).join("");
+    card(title,
+      `<table>
+         <tr><th>Group</th><th>N</th><th>Mean</th><th>Median</th></tr>
+         ${rows}
+       </table>`
+    );
+  }
+
+  renderGroup("By Agreement Type", obj.group_type);
+  renderGroup("By Legal Reference", obj.group_legal);
+  renderGroup("By Number of Related Parties", obj.group_party);
+
+  // Shapiro test
+  if(obj.shapiro){
+    card("Normality Test (Shapiro–Wilk)",
+      `<pre>${obj.shapiro.join("\\n")}</pre>`
+    );
+  }
+}
+</script>
+</body>
+</html>
